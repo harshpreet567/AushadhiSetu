@@ -1,0 +1,10 @@
+{
+  "appId": "org.aushadhisetu.app",
+  "appName": "AushadhiSetu",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  }
+}
