@@ -1,34 +1,77 @@
 import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+
 from app.database import get_db
 from app.models import Facility
 from app.schemas import LoginRequest, SignupRequest, AuthFacilityResponse
-from app.auth import verify_password, get_password_hash, create_access_token, get_current_facility
+from app.auth import (
+    verify_password,
+    get_password_hash,
+    create_access_token,
+    get_current_facility,
+)
 
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"]
+)
 
-@router.post("/login", response_model=AuthFacilityResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+@router.post(
+    "/login",
+    response_model=AuthFacilityResponse
+)
+def login(
+    payload: LoginRequest,
+    db: Session = Depends(get_db)
+):
     """
-    Authenticates facility credentials and returns JWT token + facility profile.
-    Supports email lookup or demo facility fallback.
+    Login using email and password.
     """
-    facility = db.query(Facility).filter(
-        (Facility.email == payload.email) | (Facility.facility_id == payload.email)
-    ).first()
 
-    # If demo credentials or direct email match
+    facility = (
+        db.query(Facility)
+        .filter(Facility.email == payload.email)
+        .first()
+    )
+
+    # Email does not exist
     if not facility:
-        # Fallback to default demo facility if user logs in with demo credentials
-        facility = db.query(Facility).filter(Facility.facility_id == "FAC-B").first()
-        if not facility:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials"
-            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
 
-    token = create_access_token({"sub": facility.facility_id, "email": facility.email})
+    # Facility has no password
+    if not facility.hashed_password:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
+
+    # Check password
+    if not verify_password(
+        payload.password,
+        facility.hashed_password
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
+
+    # Create JWT token
+    token = create_access_token(
+        {
+            "sub": facility.facility_id,
+            "email": facility.email
+        }
+    )
 
     return {
         "facility_id": facility.facility_id,
@@ -41,12 +84,30 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         "token_type": "bearer"
     }
 
-@router.post("/signup", response_model=AuthFacilityResponse)
-def signup(payload: SignupRequest, db: Session = Depends(get_db)):
+
+# ============================================================
+# SIGN UP
+# ============================================================
+
+@router.post(
+    "/signup",
+    response_model=AuthFacilityResponse
+)
+def signup(
+    payload: SignupRequest,
+    db: Session = Depends(get_db)
+):
     """
-    Registers a new healthcare facility in the AushadhiSetu network.
+    Create a new healthcare facility account.
     """
-    existing = db.query(Facility).filter(Facility.email == payload.email).first()
+
+    # Check whether email already exists
+    existing = (
+        db.query(Facility)
+        .filter(Facility.email == payload.email)
+        .first()
+    )
+
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -56,15 +117,25 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     # Generate unique facility ID
     new_id = f"FAC-{uuid.uuid4().hex[:6].upper()}"
 
+    # Create facility
     new_facility = Facility(
         facility_id=new_id,
         name=payload.facility_name,
         type=payload.facility_type,
         address=payload.location,
-        latitude=28.6139,   # Default coordinates
+
+        # Default coordinates for now
+        latitude=28.6139,
         longitude=77.2090,
+
         email=payload.email,
-        hashed_password=get_password_hash(payload.password),
+
+        # IMPORTANT:
+        # Store hashed password, NOT plain password
+        hashed_password=get_password_hash(
+            payload.password
+        ),
+
         top="50%",
         left="50%"
     )
@@ -73,7 +144,13 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_facility)
 
-    token = create_access_token({"sub": new_facility.facility_id, "email": new_facility.email})
+    # Create login token immediately after signup
+    token = create_access_token(
+        {
+            "sub": new_facility.facility_id,
+            "email": new_facility.email
+        }
+    )
 
     return {
         "facility_id": new_facility.facility_id,
@@ -86,16 +163,34 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
         "token_type": "bearer"
     }
 
-@router.get("/me", response_model=AuthFacilityResponse)
-def get_me(current_facility: Facility = Depends(get_current_facility)):
+
+# ============================================================
+# CURRENT USER
+# ============================================================
+
+@router.get(
+    "/me",
+    response_model=AuthFacilityResponse
+)
+def get_me(
+    current_facility: Facility = Depends(
+        get_current_facility
+    )
+):
     """
-    Returns current authenticated facility details.
+    Get currently logged-in facility.
     """
+
     return {
         "facility_id": current_facility.facility_id,
         "name": current_facility.name,
         "type": current_facility.type,
         "address": current_facility.address,
         "latitude": current_facility.latitude,
-        "longitude": current_facility.longitude
+        "longitude": current_facility.longitude,
+
+        # /me is authenticated using an existing token.
+        # These values are not needed by the frontend for hydration.
+        "access_token": "",
+        "token_type": "bearer"
     }
