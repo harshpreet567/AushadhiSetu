@@ -1,15 +1,14 @@
 const {useState, useEffect} = React;
 
-
 /* ============================================================
    HELPER
    ============================================================ */
 
-function delay(ms){
+function uiDelay(ms){
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function byId(list, key, id){
+function findById(list, key, id){
   return list.find(x => x[key] === id);
 }
 
@@ -660,28 +659,494 @@ function Dashboard({go, selectMedicine}){
 function Stock({onOpen}){
 
   const [meds, setMeds] = useState(null);
+  const [search, setSearch] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  // Network-wide surplus search (other facilities' stock)
+  const [surplusNetwork, setSurplusNetwork] = useState(null);
+  const [facilities, setFacilities] = useState(null);
+  const [selectedNetworkResult, setSelectedNetworkResult] = useState(null);
+
+  const [form, setForm] = useState({
+    name: "",
+    batch: "",
+    quantity: "",
+    expiry_date: "",
+    daily_consumption: "",
+    storage_requirement: "Room temperature"
+  });
+
+  const loadMeds = () => {
+    api.getInventory().then(setMeds);
+  };
 
   useEffect(()=>{
-    api.getInventory().then(setMeds);
+    loadMeds();
+    api.getSurplus().then(setSurplusNetwork);
+    api.getFacilities().then(setFacilities);
   }, []);
 
   if(!meds){
     return <div className="empty">Loading inventory…</div>;
   }
 
+  /* ---------- SEARCH FILTER (own inventory) ---------- */
+
+  const filtered = meds.filter(m =>
+    m.name.toLowerCase().includes(
+      search.trim().toLowerCase()
+    )
+  );
+
+
+  /* ---------- NETWORK SURPLUS SEARCH ----------
+     Finds other facilities carrying surplus stock of the
+     searched medicine, soonest-to-expire first. The medicine
+     name for each surplus row is resolved against our own
+     inventory (the shared medicine_id catalog), since the
+     surplus records themselves only carry the id.
+  ---------------------------------------------------------- */
+
+  const networkMatches = (
+    search.trim() &&
+    surplusNetwork &&
+    facilities
+  )
+    ? surplusNetwork
+        .map(s => {
+
+          const med = findById(
+            meds, "medicine_id", s.medicine_id
+          );
+
+          return {
+            ...s,
+            medicineName: med ? med.name : s.medicine_id,
+            facility: findById(
+              facilities, "facility_id", s.facility_id
+            )
+          };
+        })
+        .filter(s =>
+          s.medicineName
+            .toLowerCase()
+            .includes(search.trim().toLowerCase())
+        )
+        .sort((a, b) =>
+          new Date(a.expiry_date) - new Date(b.expiry_date)
+        )
+    : [];
+
+
+  /* ---------- ADD MEDICINE FORM ---------- */
+
+  const setField = (key, value) => {
+    setForm(prev => ({
+      ...prev,
+      [key]: value
+    }));
+
+    if(formError){
+      setFormError("");
+    }
+  };
+
+  const resetForm = () => {
+    setForm({
+      name: "",
+      batch: "",
+      quantity: "",
+      expiry_date: "",
+      daily_consumption: "",
+      storage_requirement: "Room temperature"
+    });
+  };
+
+  const submitAdd = async (e) => {
+
+    e.preventDefault();
+    setFormError("");
+
+    if(!form.name.trim()){
+      setFormError("Please enter the medicine name.");
+      return;
+    }
+
+    if(!form.batch.trim()){
+      setFormError("Please enter the batch number.");
+      return;
+    }
+
+    if(!form.quantity || Number(form.quantity) <= 0){
+      setFormError("Please enter a valid quantity.");
+      return;
+    }
+
+    if(!form.expiry_date){
+      setFormError("Please enter the expiry date.");
+      return;
+    }
+
+    if(
+      form.daily_consumption === "" ||
+      Number(form.daily_consumption) < 0
+    ){
+      setFormError("Please enter daily consumption.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+
+      await api.addMedicine({
+        name: form.name.trim(),
+        batch: form.batch.trim(),
+        quantity: Number(form.quantity),
+        expiry_date: form.expiry_date,
+        daily_consumption: Number(form.daily_consumption),
+        storage_requirement: form.storage_requirement
+      });
+
+      resetForm();
+      setShowAdd(false);
+      loadMeds();
+
+    }
+
+    catch(err){
+
+      console.error("Add medicine error:", err);
+
+      setFormError(
+        err?.message ||
+        "Could not add medicine. Please try again."
+      );
+
+    }
+
+    finally{
+      setSaving(false);
+    }
+  };
+
+
   return (
     <div>
 
-      <h2>Medicine stock</h2>
+      <div
+        className="card-row"
+        style={{alignItems:"flex-start", marginBottom: 4}}
+      >
 
-      <p style={{
-        color:"var(--muted)",
-        marginTop:-8
-      }}>
-        What do we currently have?
-      </p>
+        <div>
+          <h2 style={{marginBottom:2}}>Medicine stock</h2>
+
+          <p style={{
+            color:"var(--muted)",
+            margin:0
+          }}>
+            What do we currently have?
+          </p>
+        </div>
+
+        <button
+          className="btn btn-primary"
+          onClick={()=>setShowAdd(v=>!v)}
+        >
+          {showAdd ? "Close" : "+ Add medicine"}
+        </button>
+
+      </div>
 
       <Source path="GET /inventory" />
+
+
+      {/* ---------- SEARCH BAR ---------- */}
+
+      <input
+        type="text"
+        value={search}
+        onChange={e=>{
+          setSearch(e.target.value);
+          setSelectedNetworkResult(null);
+        }}
+        placeholder="Search medicine by name…"
+        style={{
+          width:"100%",
+          margin:"14px 0",
+          padding:"10px 12px",
+          borderRadius:8,
+          border:"1px solid #ddd",
+          boxSizing:"border-box"
+        }}
+      />
+
+
+      {/* ---------- NETWORK SURPLUS RESULTS ---------- */}
+
+      {search.trim() && networkMatches.length > 0 && (
+
+        <div className="card" style={{marginBottom:18}}>
+
+          <h3 style={{marginTop:0}}>Available in the network</h3>
+
+          <p style={{
+            color:"var(--muted)",
+            marginTop:-6,
+            fontSize:13
+          }}>
+            Other facilities with surplus stock of this medicine —
+            soonest to expire first.
+          </p>
+
+          <Source path="GET /surplus + GET /facilities" />
+
+          {networkMatches.map(n=>{
+
+            const daysToExpiry = Math.floor(
+              (new Date(n.expiry_date) - new Date()) /
+              (1000 * 60 * 60 * 24)
+            );
+
+            const expiringSoon = daysToExpiry <= 30;
+
+            return (
+
+              <div
+                key={n.surplus_id}
+                className="card list-alert clickable"
+                style={{marginTop:10}}
+                onClick={()=>setSelectedNetworkResult(n)}
+              >
+
+                <div className="card-row">
+
+                  <div>
+
+                    <b>
+                      {n.facility ? n.facility.name : n.facility_id}
+                    </b>
+
+                    <p style={{
+                      margin:"4px 0 0 0",
+                      fontSize:13
+                    }}>
+                      {n.available_quantity} units of{" "}
+                      {n.medicineName} available
+                      {n.facility ? ` · ${n.facility.type}` : ""}
+                    </p>
+
+                  </div>
+
+                  {expiringSoon && (
+                    <span className="badge high">
+                      Expiring soon
+                    </span>
+                  )}
+
+                </div>
+
+              </div>
+
+            );
+          })}
+
+        </div>
+
+      )}
+
+
+      {/* ---------- SELECTED NETWORK RESULT DETAIL ---------- */}
+
+      {selectedNetworkResult && (
+
+        <div
+          className="card"
+          style={{
+            marginBottom:18,
+            borderLeft:"4px solid var(--accent, #2563eb)"
+          }}
+        >
+
+          <div
+            className="card-row"
+            style={{alignItems:"flex-start"}}
+          >
+
+            <h3 style={{marginTop:0}}>
+              {selectedNetworkResult.medicineName} —{" "}
+              {selectedNetworkResult.facility
+                ? selectedNetworkResult.facility.name
+                : selectedNetworkResult.facility_id
+              }
+            </h3>
+
+            <button
+              className="btn btn-ghost"
+              onClick={()=>setSelectedNetworkResult(null)}
+            >
+              Close
+            </button>
+
+          </div>
+
+          <div className="kv">
+
+            <div>Facility type</div>
+            <div>
+              {selectedNetworkResult.facility
+                ? selectedNetworkResult.facility.type
+                : "—"
+              }
+            </div>
+
+            <div>Address</div>
+            <div>
+              {selectedNetworkResult.facility
+                ? selectedNetworkResult.facility.address
+                : "—"
+              }
+            </div>
+
+            <div>Available quantity</div>
+            <div className="mono">
+              {selectedNetworkResult.available_quantity} units
+            </div>
+
+            <div>Expiry date</div>
+            <div className="mono">
+              {selectedNetworkResult.expiry_date}
+            </div>
+
+            <div>Status</div>
+            <div>{selectedNetworkResult.status}</div>
+
+          </div>
+
+        </div>
+
+      )}
+
+
+      {/* ---------- ADD MEDICINE FORM ---------- */}
+
+      {showAdd && (
+
+        <div className="card" style={{marginBottom:18}}>
+
+          <h3 style={{marginTop:0}}>Add new medicine</h3>
+
+          <Source path="POST /inventory" />
+
+          {formError && (
+            <div
+              style={{
+                margin:"10px 0",
+                padding:"10px 12px",
+                borderRadius:8,
+                background:"#fff1f1",
+                border:"1px solid #f0b5b5",
+                color:"#b42318",
+                fontSize:13
+              }}
+            >
+              ⚠️ {formError}
+            </div>
+          )}
+
+          <form onSubmit={submitAdd}>
+
+            <label>Medicine name</label>
+            <input
+              type="text"
+              value={form.name}
+              onChange={e=>setField("name", e.target.value)}
+              placeholder="e.g. Paracetamol 500mg"
+              required
+            />
+
+            <label>Batch</label>
+            <input
+              type="text"
+              value={form.batch}
+              onChange={e=>setField("batch", e.target.value)}
+              placeholder="e.g. PCT102"
+              required
+            />
+
+            <label>Quantity</label>
+            <input
+              type="number"
+              min="0"
+              value={form.quantity}
+              onChange={e=>setField("quantity", e.target.value)}
+              required
+            />
+
+            <label>Expiry date</label>
+            <input
+              type="date"
+              value={form.expiry_date}
+              onChange={e=>setField("expiry_date", e.target.value)}
+              required
+            />
+
+            <label>Daily consumption</label>
+            <input
+              type="number"
+              min="0"
+              value={form.daily_consumption}
+              onChange={e=>setField("daily_consumption", e.target.value)}
+              required
+            />
+
+            <label>Storage requirement</label>
+            <select
+              value={form.storage_requirement}
+              onChange={e=>setField("storage_requirement", e.target.value)}
+            >
+              <option value="Room temperature">Room temperature</option>
+              <option value="2–8°C (cold chain)">2–8°C (cold chain)</option>
+            </select>
+
+            <div style={{display:"flex", gap:10, marginTop:16}}>
+
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={saving}
+              >
+                {saving ? "Saving…" : "Save medicine"}
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={()=>{
+                  setShowAdd(false);
+                  setFormError("");
+                }}
+              >
+                Cancel
+              </button>
+
+            </div>
+
+          </form>
+
+        </div>
+
+      )}
+
+
+      {filtered.length === 0 && (
+        <div className="empty">
+          No medicines match your search.
+        </div>
+      )}
 
       <table>
 
@@ -698,7 +1163,7 @@ function Stock({onOpen}){
 
         <tbody>
 
-          {meds.map(m=>(
+          {filtered.map(m=>(
             <tr
               key={m.medicine_id}
               className="clickable"
@@ -979,10 +1444,18 @@ function Surplus(){
 
       {rows.map(s=>{
 
-        const f = byId(
+        const f = findById(
           fac,
           "facility_id",
           s.facility_id
+        );
+
+        /* FIX: look up the real medicine name instead of
+           hardcoding "Paracetamol 500mg" for every row */
+        const med = findById(
+          meds,
+          "medicine_id",
+          s.medicine_id
         );
 
         return (
@@ -995,7 +1468,7 @@ function Surplus(){
             <div className="kv">
 
               <div>Medicine</div>
-              <div>Paracetamol 500mg</div>
+              <div>{med ? med.name : s.medicine_id}</div>
 
               <div>Surplus</div>
               <div className="mono">
@@ -1126,20 +1599,19 @@ function Network(){
             {!selected.self && (
               <>
 
+                {/* FIX: use the real distance/travel_time
+                   from the facility record (via the Distance
+                   Matrix API on the backend) instead of a
+                   hardcoded FAC-A check */}
+
                 <div>Distance</div>
                 <div className="mono">
-                  {selected.facility_id==="FAC-A"
-                    ? "18 km"
-                    : "250 km"
-                  }
+                  {selected.distance || "—"}
                 </div>
 
                 <div>Est. travel time</div>
                 <div className="mono">
-                  {selected.facility_id==="FAC-A"
-                    ? "45 min"
-                    : "~8 hours"
-                  }
+                  {selected.travel_time || "—"}
                 </div>
 
               </>
@@ -1192,7 +1664,7 @@ function Recommendations({onOpen}){
   }
 
   const nameOf = id =>
-    (byId(fac,"facility_id",id)||{}).name || id;
+    (findById(fac,"facility_id",id)||{}).name || id;
 
   return (
     <div>
@@ -1278,7 +1750,7 @@ function RecommendationDetail({id, back, onApprove}){
 
     api.getRecommendations().then(
       list => setR(
-        byId(list,"recommendation_id",id)
+        findById(list,"recommendation_id",id)
       )
     );
 
@@ -1291,7 +1763,7 @@ function RecommendationDetail({id, back, onApprove}){
   }
 
   const nameOf = fid =>
-    (byId(fac,"facility_id",fid)||{}).name || fid;
+    (findById(fac,"facility_id",fid)||{}).name || fid;
 
   return (
     <div>
@@ -1385,8 +1857,20 @@ function Approve({rec, fac, onDone}){
   const [transfer, setTransfer] = useState(null);
   const [error, setError] = useState("");
 
+  /* FIX: fetch inventory so we can show the real medicine
+     name instead of hardcoding "Paracetamol 500mg" */
+  const [meds, setMeds] = useState(null);
+
+  useEffect(()=>{
+    api.getInventory().then(setMeds);
+  }, []);
+
   const nameOf = fid =>
-    (byId(fac,"facility_id",fid)||{}).name || fid;
+    (findById(fac,"facility_id",fid)||{}).name || fid;
+
+  const medicineName = meds
+    ? ((findById(meds,"medicine_id",rec.medicine_id)||{}).name || rec.medicine_id || "Medicine")
+    : "Loading…";
 
 
   const approve = async () => {
@@ -1403,7 +1887,7 @@ function Approve({rec, fac, onDone}){
 
       setPipe(1);
 
-      await delay(500);
+      await uiDelay(500);
 
       setPipe(2);
 
@@ -1414,7 +1898,7 @@ function Approve({rec, fac, onDone}){
 
       setPipe(3);
 
-      await delay(400);
+      await uiDelay(400);
 
       setPipe(4);
 
@@ -1475,7 +1959,7 @@ function Approve({rec, fac, onDone}){
         <div className="kv">
 
           <div>Medicine</div>
-          <div>Paracetamol 500mg</div>
+          <div>{medicineName}</div>
 
           <div>Quantity</div>
           <div className="mono">
@@ -1675,6 +2159,50 @@ function App(){
 
 
   /* ----------------------------------------------------------
+     RESTORE SESSION ON RELOAD
+
+     FIX: a token was being read from localStorage but never
+     saved there on login, and even when one existed, the
+     `facility` object itself was never restored — so a page
+     refresh always dumped the user back to the welcome screen,
+     and any screen depending on `facility` (like Approve)
+     silently never loaded. This fetches the current facility's
+     own record (the one flagged `self: true`) using the saved
+     token so the session survives a reload.
+     ---------------------------------------------------------- */
+
+  useEffect(()=>{
+
+    if(existingToken && !facility){
+
+      api.getFacilities()
+        .then(list=>{
+
+          const self = list.find(x=>x.self);
+
+          if(self){
+            setFacility(self);
+          } else {
+            // Token doesn't map to a facility anymore
+            localStorage.removeItem("aushadhisetu_token");
+            setView("welcome");
+          }
+
+        })
+        .catch(err=>{
+          console.error("Session restore error:", err);
+          localStorage.removeItem("aushadhisetu_token");
+          setFacility(null);
+          setView("welcome");
+        });
+
+    }
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+
+  /* ----------------------------------------------------------
      LOAD FACILITIES AFTER LOGIN
      ---------------------------------------------------------- */
 
@@ -1694,6 +2222,25 @@ function App(){
     }
 
   }, [facility]);
+
+
+  /* ----------------------------------------------------------
+     LOGIN HANDLER
+
+     FIX: this is where the access_token from the backend is
+     now actually persisted to localStorage. Previously nothing
+     ever called setItem, so `existingToken` was always null.
+     ---------------------------------------------------------- */
+
+  const handleLogin = (f) => {
+
+    if(f?.access_token){
+      localStorage.setItem("aushadhisetu_token", f.access_token);
+    }
+
+    setFacility(f);
+    setView("dashboard");
+  };
 
 
   /* ----------------------------------------------------------
@@ -1719,21 +2266,7 @@ function App(){
 
     return (
       <LoginSignup
-        onLogin={(f)=>{
-
-          /*
-            Save authenticated facility
-          */
-
-          setFacility(f);
-
-          /*
-            Only successful login reaches here.
-          */
-
-          setView("dashboard");
-
-        }}
+        onLogin={handleLogin}
       />
     );
 
@@ -1752,12 +2285,7 @@ function App(){
 
     return (
       <LoginSignup
-        onLogin={(f)=>{
-
-          setFacility(f);
-          setView("dashboard");
-
-        }}
+        onLogin={handleLogin}
       />
     );
 

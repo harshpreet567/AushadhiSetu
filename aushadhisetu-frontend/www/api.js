@@ -210,6 +210,22 @@ let DB = {
 
 
 // ============================================================
+// RESTORE LOCALLY-ADDED MEDICINES
+// (only affects the mock fallback path — if the real backend
+// is reachable, its data is always used instead)
+// ============================================================
+
+try {
+  const savedMeds = localStorage.getItem("aushadhisetu_mock_medicines");
+  if (savedMeds) {
+    DB.medicines = JSON.parse(savedMeds);
+  }
+} catch (e) {
+  console.warn("Could not restore locally saved medicines:", e);
+}
+
+
+// ============================================================
 // HELPER FUNCTIONS
 // ============================================================
 
@@ -231,6 +247,36 @@ function getAuthHeaders() {
   }
 
   return headers;
+}
+
+
+// ============================================================
+// SHORTAGE / EXPIRY RISK ESTIMATION (used for medicines added
+// locally, so newly-added rows look consistent with the rest
+// of the mock table until the real AI service classifies them)
+// ============================================================
+
+function estimateDaysOfStock(quantity, dailyConsumption) {
+  if (!dailyConsumption || dailyConsumption <= 0) {
+    return quantity > 0 ? 999 : 0;
+  }
+  return Math.floor(quantity / dailyConsumption);
+}
+
+function estimateShortageRisk(daysOfStock) {
+  if (daysOfStock <= 5) return "HIGH";
+  if (daysOfStock <= 15) return "MEDIUM";
+  return "LOW";
+}
+
+function estimateExpiryRisk(expiryDateStr) {
+  const expiry = new Date(expiryDateStr);
+  const now = new Date();
+  const daysToExpiry = Math.floor((expiry - now) / (1000 * 60 * 60 * 24));
+
+  if (daysToExpiry <= 30) return "HIGH";
+  if (daysToExpiry <= 90) return "MEDIUM";
+  return "LOW";
 }
 
 
@@ -406,6 +452,102 @@ const api = {
         m.facility_id ===
         DB.facility.facility_id
     );
+  },
+
+
+  // ==========================================================
+  // ADD MEDICINE
+  // ==========================================================
+
+  async addMedicine(payload) {
+
+    try {
+
+      const res = await fetch(
+        `${API_BASE}/inventory`,
+        {
+          method: "POST",
+          headers: getAuthHeaders(),
+          body: JSON.stringify(payload)
+        }
+      );
+
+      let data = {};
+
+      try {
+        data = await res.json();
+      } catch (jsonError) {
+        data = {};
+      }
+
+      if (res.ok) {
+        return data;
+      }
+
+      throw new Error(
+        data.detail ||
+        data.message ||
+        `Could not add medicine (${res.status})`
+      );
+
+    } catch (e) {
+
+      // Only fall back to mock storage when the backend itself
+      // is unreachable (network/fetch failure) — a real
+      // rejection from the backend (validation, auth, etc.)
+      // should surface as an error, not be silently swallowed.
+
+      const isNetworkError =
+        e instanceof TypeError ||
+        (e?.message || "").toLowerCase().includes("fetch");
+
+      if (!isNetworkError) {
+        throw e;
+      }
+
+      console.warn(
+        "Backend unavailable, adding medicine to mock inventory:",
+        e
+      );
+    }
+
+    await delay();
+
+    const nextNum = DB.medicines.length + 1;
+    const medicine_id = "MED" + String(nextNum).padStart(3, "0");
+
+    const daysOfStock = estimateDaysOfStock(
+      payload.quantity,
+      payload.daily_consumption
+    );
+
+    const newMedicine = {
+      medicine_id,
+      name: payload.name,
+      batch: payload.batch,
+      quantity: payload.quantity,
+      expiry_date: payload.expiry_date,
+      daily_consumption: payload.daily_consumption,
+      storage_requirement: payload.storage_requirement || "Room temperature",
+      facility_id: DB.facility.facility_id,
+      days_of_stock: daysOfStock,
+      shortage_risk: estimateShortageRisk(daysOfStock),
+      expiry_risk: estimateExpiryRisk(payload.expiry_date),
+      potential_surplus: 0
+    };
+
+    DB.medicines.push(newMedicine);
+
+    try {
+      localStorage.setItem(
+        "aushadhisetu_mock_medicines",
+        JSON.stringify(DB.medicines)
+      );
+    } catch (e) {
+      console.warn("Could not persist medicines locally:", e);
+    }
+
+    return newMedicine;
   },
 
 
